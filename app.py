@@ -65,15 +65,6 @@ CREATE TABLE IF NOT EXISTS activity_log (
 
 conn.commit()
 
-# ---------------- HELPERS ----------------
-def now_str():
-    return datetime.now().strftime("%d-%m-%Y %I:%M %p")
-
-def next_system_no():
-    c.execute("SELECT MAX(system_no) FROM systems")
-    m = c.fetchone()[0]
-    return 2000 if m is None else m + 1
-
 # ---------------- DEFAULT USERS ----------------
 c.execute("SELECT COUNT(*) FROM users")
 if c.fetchone()[0] == 0:
@@ -85,26 +76,14 @@ if c.fetchone()[0] == 0:
     c.executemany("INSERT INTO users VALUES (?,?,?)", users)
     conn.commit()
 
-# ---------------- DEFAULT ITEMS ----------------
-c.execute("SELECT COUNT(*) FROM systems")
-if c.fetchone()[0] == 0:
-    default_items = [
-        (2000, "Monitor", 10, "Good", "Working"),
-        (2001, "Mouse", 5, "Average", "Working"),
-        (2002, "Keyboard", 1, "Poor", "Not Working"),
-        (2003, "CPU", 3, "Good", "Working"),
-        (2004, "UPS", 2, "Average", "Working")
-    ]
+# ---------------- HELPERS ----------------
+def now_str():
+    return datetime.now().strftime("%d-%m-%Y %I:%M %p")
 
-    c.executemany("INSERT INTO systems VALUES (?,?,?,?,?)", default_items)
-
-    for item in default_items:
-        c.execute(
-            "INSERT INTO activity_log(action, system_no, quantity, date_time) VALUES (?,?,?,?)",
-            ("ADD", item[0], item[2], now_str())
-        )
-
-    conn.commit()
+def next_system_no():
+    c.execute("SELECT MAX(system_no) FROM systems")
+    m = c.fetchone()[0]
+    return 2000 if m is None else m + 1
 
 # ---------------- SESSION ----------------
 if "logged_in" not in st.session_state:
@@ -181,13 +160,16 @@ def main_app():
         col1.metric("Total Items", len(df))
         col2.metric("Total Quantity", int(df["quantity"].sum()) if not df.empty else 0)
         col3.metric("Total Added", log[log.action=="ADD"]["quantity"].sum())
-        col4.metric("Last Update", log.iloc[-1]["date_time"] if not log.empty else "-")
+        col4.metric(
+            "Last Update",
+            log.iloc[-1]["date_time"] if not log.empty else "-"
+        )
 
         def style_row(row):
             if row["quantity"] <= 2:
                 return ["background-color:#ff4d4d;color:white;font-weight:bold"] * len(row)
             if row["status"] == "Not Working":
-                return ["background-color:#ffd6d6"] * len(row)
+                return ["background-color:#ffcccc"] * len(row)
             if row["quality"] == "Poor":
                 return ["background-color:#fff2cc"] * len(row)
             return [""] * len(row)
@@ -227,6 +209,94 @@ def main_app():
             st.success("Item added")
             st.rerun()
 
+    # ---------- UPDATE ----------
+    elif choice == "Update Item":
+        st.subheader("🛠️ Update Item")
+
+        sys_no = st.number_input("System No", min_value=2000, step=1)
+        c.execute("SELECT * FROM systems WHERE system_no=?", (sys_no,))
+        r = c.fetchone()
+
+        if r:
+            name = st.text_input("Item Name", r[1])
+            qty = st.number_input("Quantity", min_value=0, value=r[2])
+            quality = st.selectbox("Quality", ["Good","Average","Poor"], index=["Good","Average","Poor"].index(r[3]))
+            status = st.selectbox("Status", ["Working","Not Working"], index=0 if r[4]=="Working" else 1)
+
+            if st.button("Update"):
+                c.execute(
+                    "UPDATE systems SET name=?, quantity=?, quality=?, status=? WHERE system_no=?",
+                    (name, qty, quality, status, sys_no)
+                )
+                conn.commit()
+                st.success("Updated")
+                st.rerun()
+        else:
+            st.info("Item not found")
+
+    # ---------- DELETE ----------
+    elif choice == "Delete Item":
+        st.subheader("🗑️ Delete Item")
+
+        sys_no = st.number_input("System No", min_value=2000, step=1)
+        if st.button("Delete"):
+            c.execute("DELETE FROM systems WHERE system_no=?", (sys_no,))
+            c.execute(
+                "INSERT INTO activity_log(action, system_no, quantity, date_time) VALUES (?,?,?,?)",
+                ("DELETE", sys_no, 0, now_str())
+            )
+            conn.commit()
+            st.success("Deleted")
+            st.rerun()
+
+    # ---------- COMPLAINT ----------
+    elif choice == "Raise Complaint":
+        st.subheader("📩 Raise Complaint")
+
+        title = st.text_input("Title")
+        desc = st.text_area("Description")
+
+        if st.button("Submit"):
+            c.execute("""
+                INSERT INTO complaints
+                (raised_by, role, title, description, status, date_time)
+                VALUES (?,?,?,?,?,?)
+            """, (st.session_state.username, role, title, desc, "Open", now_str()))
+            conn.commit()
+            st.success("Complaint submitted")
+            st.rerun()
+
+    elif choice == "Complaints":
+        df = pd.read_sql("SELECT * FROM complaints ORDER BY id DESC", conn)
+        st.dataframe(df, use_container_width=True, hide_index=True)
+
+    # ---------- DEAD STOCK ----------
+    elif choice == "Dead Stock":
+        st.subheader("📦 Dead Stock")
+
+        df = pd.read_sql("SELECT * FROM systems", conn)
+        if not df.empty:
+            sys_no = st.selectbox("System No", df["system_no"])
+            reason = st.text_input("Reason")
+
+            if st.button("Move to Dead Stock"):
+                if role != "HOD":
+                    st.error("Only HOD allowed")
+                else:
+                    name = df[df.system_no==sys_no].iloc[0]["name"]
+                    c.execute("""
+                        INSERT INTO dead_stock
+                        (system_no, name, reason, accepted_by, date_time)
+                        VALUES (?,?,?,?,?)
+                    """, (sys_no, name, reason, st.session_state.username, now_str()))
+                    c.execute("DELETE FROM systems WHERE system_no=?", (sys_no,))
+                    conn.commit()
+                    st.success("Moved to Dead Stock")
+                    st.rerun()
+
+        ds = pd.read_sql("SELECT * FROM dead_stock", conn)
+        st.dataframe(ds, use_container_width=True, hide_index=True)
+
     # ---------- REPORTS ----------
     elif choice == "Reports":
         st.subheader("📊 Reports")
@@ -242,6 +312,24 @@ def main_app():
                 autopct="%1.1f%%"
             )
             st.pyplot(fig)
+
+    # ---------- EXCEL ----------
+    elif choice == "Excel Upload / Download":
+        if role != "Admin":
+            st.error("Admin only")
+            return
+
+        file = st.file_uploader("Upload Excel", type=["xlsx"])
+        if file:
+            df = pd.read_excel(file)
+            df.to_sql("systems", conn, if_exists="replace", index=False)
+            st.success("Uploaded")
+            st.rerun()
+
+        df = pd.read_sql("SELECT * FROM systems", conn)
+        df.to_excel("inventory.xlsx", index=False)
+        with open("inventory.xlsx","rb") as f:
+            st.download_button("Download Excel", f, "inventory.xlsx")
 
 # ---------------- RUN ----------------
 if not st.session_state.logged_in:
